@@ -64,9 +64,19 @@ ollama pull nomic-embed-text
 uvicorn backend.main:app --reload
 ```
 
+### 6. Correr o frontend React
+
+```bash
+cd Frontend
+npm install
+copy .env.example .env
+npm run dev
+```
+
 Documentacao automatica:
 
 - Swagger UI: `http://127.0.0.1:8000/docs`
+- Frontend React: `http://127.0.0.1:5173`
 
 ## Como funciona
 
@@ -127,3 +137,4 @@ Nao e necessario reiniciar a API para adicionar novos documentos.
 - O projeto foi mantido simples de proposito.
 - O frontend nao e necessario; os testes podem ser feitos por Swagger, Postman ou `curl`.
 - O sistema responde apenas com base nos documentos enviados para o endpoint `/upload`.
+- O frontend React permite demonstrar o fluxo completo de upload e perguntas sobre documentos.
