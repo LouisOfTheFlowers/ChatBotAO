@@ -27,15 +27,43 @@ requirements.txt
 
 ## Como correr
 
-### 1. Subir os servicos base
+### 1. Correr tudo com Docker
 
 ```bash
-docker compose up -d
+docker compose up --build -d
 ```
 
 Isto arranca:
 
+- Backend FastAPI em `localhost:8000`
+- Frontend React em `localhost:3000`
 - Ollama em `localhost:11434`
+
+### 2. Descarregar os modelos no Ollama dentro do container
+
+```bash
+docker exec -it ollama ollama pull llama3
+docker exec -it ollama ollama pull nomic-embed-text
+```
+
+Depois de descarregar os modelos, reinicia o backend para garantir que arranca com tudo pronto:
+
+```bash
+docker compose restart backend
+```
+
+### 3. Enderecos da aplicacao
+
+- Swagger UI: `http://127.0.0.1:8000/docs`
+- Frontend React: `http://127.0.0.1:3000`
+
+## Execucao local sem Docker
+
+### 1. Subir apenas o Ollama
+
+```bash
+docker compose up -d ollama
+```
 
 ### 2. Instalar dependencias Python
 
@@ -45,26 +73,19 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 3. Configurar variaveis de ambiente
+### 3. Configurar variaveis de ambiente do backend
 
 ```bash
 copy .env.example .env
 ```
 
-### 4. Descarregar os modelos no Ollama
-
-```bash
-ollama pull llama3
-ollama pull nomic-embed-text
-```
-
-### 5. Correr a API
+### 4. Correr a API
 
 ```bash
 uvicorn backend.main:app --reload
 ```
 
-### 6. Correr o frontend React
+### 5. Correr o frontend React
 
 ```bash
 cd Frontend
@@ -72,11 +93,6 @@ npm install
 copy .env.example .env
 npm run dev
 ```
-
-Documentacao automatica:
-
-- Swagger UI: `http://127.0.0.1:8000/docs`
-- Frontend React: `http://127.0.0.1:5173`
 
 ## Como funciona
 
