@@ -1,0 +1,49 @@
+.git
+.gitignore
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+backend/venv/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Logs
+*.log
+run_logs/
+
+# Local data
+chroma_data/
+
+# Frontend
+node_modules/
+Frontend/node_modules/
+Frontend/dist/
+Frontend/build/
+.next/
+.vite/
+
+# Editors and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
