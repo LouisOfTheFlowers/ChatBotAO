@@ -150,12 +150,19 @@ def run_chat(payload: ChatRequest) -> ChatResponse:
     )
 
     chain = prompt | _get_llm() | StrOutputParser()
-    answer = chain.invoke(
-        {
-            "document_context": document_context,
-            "question": question,
-        }
-    )
+    try:
+        answer = chain.invoke(
+            {
+                "document_context": document_context,
+                "question": question,
+            }
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Nao foi possivel gerar a resposta no Ollama. "
+            f"Confirma que o modelo '{settings.ollama_llm_model}' esta disponivel "
+            "e que o Docker tem memoria suficiente."
+        ) from exc
 
     return ChatResponse(
         question=question,

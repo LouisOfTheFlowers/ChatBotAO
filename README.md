@@ -42,7 +42,7 @@ Isto arranca:
 ### 2. Descarregar os modelos no Ollama dentro do container
 
 ```bash
-docker exec -it ollama ollama pull llama3
+docker exec -it ollama ollama pull llama3.2:1b
 docker exec -it ollama ollama pull nomic-embed-text
 ```
 
@@ -51,6 +51,8 @@ Depois de descarregar os modelos, reinicia o backend para garantir que arranca c
 ```bash
 docker compose restart backend
 ```
+
+Nota: se quiseres usar `llama3`, aumenta a memoria do Docker Desktop para pelo menos 6 GB antes de o definir em `OLLAMA_LLM_MODEL`.
 
 ### 3. Enderecos da aplicacao
 

@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     chroma_persist_directory: str = "./chroma_data"
     chroma_documents_collection: str = "documents"
     ollama_base_url: str = "http://localhost:11434"
-    ollama_llm_model: str = "llama3"
+    ollama_llm_model: str = "llama3.2:1b"
     ollama_embedding_model: str = "nomic-embed-text"
     chunk_size: int = 800
     chunk_overlap: int = 120
