@@ -2,8 +2,7 @@
 
 Projeto simples e funcional para um trabalho academico. O sistema combina:
 
-- catalogo de livros de `https://books.toscrape.com`
-- ficheiros locais em `backend/books_data`
+- ficheiro local `backend/books_data/books.csv`
 - ChromaDB para pesquisa semantica
 - modelo local no Ollama
 - API em FastAPI
@@ -23,7 +22,7 @@ backend/
   books_data/    # CSVs locais com livros, ratings e utilizadores
   config.py      # Variaveis de ambiente e configuracao
   main.py        # Endpoints FastAPI
-  rag.py         # Scraping, importacao local, embeddings, pesquisa e geracao
+  rag.py         # Importacao local, embeddings, pesquisa e geracao
   schemas.py     # Modelos de pedidos e respostas
 docker-compose.yml
 requirements.txt
@@ -63,24 +62,35 @@ docker compose restart backend
 
 ## Como funciona
 
-### Endpoint `/books/scrape`
-
-Pesquisa paginas do catalogo `books.toscrape.com`, extrai detalhes dos livros e guarda chunks no ChromaDB.
-
-```bash
-curl -X POST "http://127.0.0.1:8000/books/scrape" \
-  -H "Content-Type: application/json" \
-  -d "{\"max_pages\":5}"
-```
-
-### Endpoint `/books/import-local`
+### Importacao do CSV local
 
 Le `backend/books_data/books.csv`, junta medias de `ratings.csv`, usa localizacoes de `users.csv` quando existem e guarda esses livros no ChromaDB.
 
+O backend faz esta importacao automaticamente no arranque quando o ChromaDB esta vazio. O Docker Compose vem com:
+
+- `AUTO_IMPORT_LOCAL_BOOKS=true`
+- `LOCAL_BOOKS_IMPORT_LIMIT=12000`
+
+Para este CSV, `12000` carrega o ficheiro todo.
+Para um arranque mais rapido e com menos uso de CPU, podes baixar o limite para `5000`.
+Valores como `50000` ou `100000` fazem o Ollama gerar muitos embeddings no primeiro arranque e podem demorar bastante.
+Se quiseres carregar o CSV inteiro sem picos grandes de CPU, aumenta `LOCAL_BOOKS_IMPORT_LIMIT`
+e mantem os lotes/pausas ativos:
+
+- `LOCAL_BOOKS_INGEST_BATCH_SIZE=500`
+- `LOCAL_BOOKS_INGEST_BATCH_DELAY=0.25`
+- `CHROMA_ADD_BATCH_SIZE=50`
+- `CHROMA_ADD_BATCH_DELAY=0.1`
+
+O `docker-compose.yml` tambem limita CPU no backend e no Ollama para evitar que
+a criacao de embeddings ocupe a maquina toda durante a importacao inicial.
+
+### Endpoint `/books/status`
+
+Mostra quantos chunks ja foram indexados no ChromaDB.
+
 ```bash
-curl -X POST "http://127.0.0.1:8000/books/import-local" \
-  -H "Content-Type: application/json" \
-  -d "{\"limit\":1000}"
+curl "http://127.0.0.1:8000/books/status"
 ```
 
 ### Endpoint `/chat/stream`
@@ -96,5 +106,5 @@ curl -N -X POST "http://127.0.0.1:8000/chat/stream" \
 ## Observacoes academicas
 
 - O chatbot responde apenas com base nos livros indexados no ChromaDB.
-- O frontend permite indexar dados do site, importar CSV local e fazer perguntas sobre livros.
-- O limite de importacao local evita tentar criar embeddings para centenas de milhares de livros de uma vez.
+- O frontend apenas mostra o estado do indice e permite fazer perguntas sobre livros.
+- O limite de importacao local evita tentar criar embeddings para centenas de milhares de livros de uma vez. O valor por defeito e 12000 para cobrir o CSV local atual.

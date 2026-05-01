@@ -12,14 +12,14 @@ class Settings(BaseSettings):
     chunk_size: int = 650
     chunk_overlap: int = 80
     default_top_k: int = 3
-    books_base_url: str = "https://books.toscrape.com/"
-    books_scrape_max_pages: int = 5
-    books_scrape_request_delay: float = 0.1
-    books_scrape_workers: int = 6
     local_books_data_directory: str = "backend/books_data"
     local_books_cache_path: str = "backend/books_data/books_cache.sqlite3"
-    local_books_import_limit: int = 1000
+    local_books_import_limit: int = 12000
+    auto_import_local_books: bool = True
+    local_books_ingest_batch_size: int = 500
+    local_books_ingest_batch_delay: float = 0.25
     chroma_add_batch_size: int = 100
+    chroma_add_batch_delay: float = 0.0
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

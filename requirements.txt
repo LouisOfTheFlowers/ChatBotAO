@@ -6,6 +6,4 @@ langchain-core
 langchain-text-splitters
 langchain-ollama
 chromadb
-beautifulsoup4
-requests
 pydantic-settings

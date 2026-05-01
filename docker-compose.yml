@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile.backend
     container_name: rag-backend
     restart: always
+    cpus: "1.0"
     environment:
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_LLM_MODEL: llama3.2:1b
@@ -12,6 +13,12 @@ services:
       CHROMA_PERSIST_DIRECTORY: /app/chroma_data
       LOCAL_BOOKS_DATA_DIRECTORY: /app/backend/books_data
       LOCAL_BOOKS_CACHE_PATH: /app/backend/books_data/books_cache.sqlite3
+      LOCAL_BOOKS_IMPORT_LIMIT: 12000
+      AUTO_IMPORT_LOCAL_BOOKS: "true"
+      LOCAL_BOOKS_INGEST_BATCH_SIZE: 500
+      LOCAL_BOOKS_INGEST_BATCH_DELAY: 0.25
+      CHROMA_ADD_BATCH_SIZE: 50
+      CHROMA_ADD_BATCH_DELAY: 0.1
     ports:
       - "8000:8000"
     volumes:
@@ -37,6 +44,10 @@ services:
     image: ollama/ollama
     container_name: ollama
     restart: always
+    cpus: "2.0"
+    environment:
+      OLLAMA_NUM_PARALLEL: 1
+      OLLAMA_MAX_LOADED_MODELS: 1
     ports:
       - "11434:11434"
     volumes:

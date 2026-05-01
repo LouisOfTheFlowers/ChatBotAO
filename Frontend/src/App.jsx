@@ -7,7 +7,7 @@ const initialMessages = [
     id: crypto.randomUUID(),
     role: "assistant",
     content:
-      "Faz uma pergunta sobre livros. Primeiro importa o CSV local ou indexa paginas do Books to Scrape.",
+      "Faz uma pergunta sobre livros. O backend importa o CSV local automaticamente quando o indice esta vazio.",
     sources: [],
   },
 ];
@@ -32,18 +32,6 @@ export default function App() {
   const [indexStatus, setIndexStatus] = useState("checking");
   const [indexError, setIndexError] = useState("");
   const [booksIndexed, setBooksIndexed] = useState(0);
-  const [scrapePages, setScrapePages] = useState(5);
-  const [localLimit, setLocalLimit] = useState(1000);
-  const [scrapeState, setScrapeState] = useState({
-    loading: false,
-    message: "",
-    error: "",
-  });
-  const [localImportState, setLocalImportState] = useState({
-    loading: false,
-    message: "",
-    error: "",
-  });
   const [messages, setMessages] = useState(initialMessages);
   const [question, setQuestion] = useState("");
   const [topK, setTopK] = useState(3);
@@ -110,76 +98,6 @@ export default function App() {
     if (indexStatus === "unavailable") return "Indice/Ollama indisponivel";
     return "A verificar indice";
   }, [indexStatus]);
-
-  async function handleScrape(event) {
-    event.preventDefault();
-    setScrapeState({ loading: true, message: "", error: "" });
-
-    try {
-      const response = await fetch(`${API_URL}/books/scrape`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ max_pages: scrapePages }),
-      });
-
-      if (!response.ok) {
-        throw new Error(await readApiError(response));
-      }
-
-      const payload = await response.json();
-      setBooksIndexed(payload.chunks_added ?? 0);
-      setScrapeState({
-        loading: false,
-        message: `${payload.message} ${payload.books_indexed} livros, ${payload.chunks_added} novos chunks, ${payload.max_pages} paginas.`,
-        error: "",
-      });
-
-      await refreshBooksStatus();
-    } catch (error) {
-      setScrapeState({
-        loading: false,
-        message: "",
-        error: error.message || "Indexacao do site falhou.",
-      });
-    }
-  }
-
-  async function handleLocalImport(event) {
-    event.preventDefault();
-    setLocalImportState({ loading: true, message: "", error: "" });
-
-    try {
-      const response = await fetch(`${API_URL}/books/import-local`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ limit: localLimit }),
-      });
-
-      if (!response.ok) {
-        throw new Error(await readApiError(response));
-      }
-
-      const payload = await response.json();
-      setBooksIndexed(payload.chunks_added ?? 0);
-      setLocalImportState({
-        loading: false,
-        message: `${payload.message} ${payload.books_indexed} livros, ${payload.chunks_added} novos chunks, ${payload.ratings_loaded} avaliacoes.`,
-        error: "",
-      });
-
-      await refreshBooksStatus();
-    } catch (error) {
-      setLocalImportState({
-        loading: false,
-        message: "",
-        error: error.message || "Importacao local falhou.",
-      });
-    }
-  }
 
   async function handleAsk(event) {
     event.preventDefault();
@@ -304,11 +222,11 @@ export default function App() {
       <main className="app-frame">
         <section className="hero-card">
           <div className="hero-copy">
-            <p className="eyebrow">Books to Scrape + ChromaDB + Ollama</p>
+            <p className="eyebrow">CSV local + ChromaDB + Ollama</p>
             <h1>Chatbot de livros</h1>
             <p className="hero-text">
-              Pesquisa o catalogo indexado por titulo, autor, categoria,
-              preco, classificacao, disponibilidade e descricao.
+              Pesquisa o catalogo indexado por titulo, autor, avaliacao,
+              idioma, paginas, editora e data de publicacao.
             </p>
           </div>
 
@@ -339,8 +257,9 @@ export default function App() {
               <p className="panel-kicker">Catalogo</p>
               <h2>Indice de livros</h2>
               <p className="panel-copy">
-                Importa os CSVs locais ou recolhe paginas do Books to Scrape
-                para guardar chunks no ChromaDB.
+                O CSV local e importado automaticamente no arranque quando o
+                indice esta vazio. Nao e preciso carregar dados manualmente no
+                frontend.
               </p>
             </div>
 
@@ -349,101 +268,31 @@ export default function App() {
               <strong>{booksIndexed}</strong>
             </div>
 
-            <form className="index-form" onSubmit={handleScrape}>
-              <label className="field-control" htmlFor="scrape-pages">
-                <span>Paginas do site</span>
-                <select
-                  id="scrape-pages"
-                  value={scrapePages}
-                  onChange={(event) => setScrapePages(Number(event.target.value))}
-                >
-                  {[1, 3, 5, 10, 25, 50].map((value) => (
-                    <option key={value} value={value}>
-                      {value} paginas
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <button
-                className="primary-button"
-                type="submit"
-                disabled={scrapeState.loading || backendStatus !== "online"}
-              >
-                {scrapeState.loading ? "A indexar livros..." : "Indexar site"}
-              </button>
-            </form>
-
-            {scrapeState.message ? (
-              <p className="feedback success-feedback">{scrapeState.message}</p>
-            ) : null}
-
-            {scrapeState.error ? (
-              <p className="feedback error-feedback">{scrapeState.error}</p>
-            ) : null}
-
-            <form className="index-form local-form" onSubmit={handleLocalImport}>
-              <label className="field-control" htmlFor="local-limit">
-                <span>Livros do CSV local</span>
-                <select
-                  id="local-limit"
-                  value={localLimit}
-                  onChange={(event) => setLocalLimit(Number(event.target.value))}
-                >
-                  {[250, 500, 1000, 2500, 5000, 10000].map((value) => (
-                    <option key={value} value={value}>
-                      {value} livros
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <button
-                className="secondary-button"
-                type="submit"
-                disabled={localImportState.loading || backendStatus !== "online"}
-              >
-                {localImportState.loading ? "A importar CSV..." : "Importar CSV"}
-              </button>
-            </form>
-
-            {localImportState.message ? (
-              <p className="feedback success-feedback">
-                {localImportState.message}
-              </p>
-            ) : null}
-
-            {localImportState.error ? (
-              <p className="feedback error-feedback">
-                {localImportState.error}
-              </p>
-            ) : null}
-
             <div className="hint-list">
               <h3>Perguntas rapidas</h3>
               <button
                 type="button"
-                onClick={() => setQuestion("Quais livros de Poetry estao disponiveis?")}
+                onClick={() => setQuestion("Harry Potter")}
               >
-                Livros de poesia
+                Harry Potter
               </button>
               <button
                 type="button"
-                onClick={() => setQuestion("Que livros tem classificacao Five?")}
+                onClick={() => setQuestion("Que livros de J.K. Rowling existem?")}
               >
-                Classificacao maxima
+                Livros de J.K. Rowling
               </button>
               <button
                 type="button"
-                onClick={() => setQuestion("Qual e o preco de A Light in the Attic?")}
+                onClick={() => setQuestion("Quantas paginas tem The Hobbit?")}
               >
-                Preco de um livro
+                Paginas de um livro
               </button>
               <button
                 type="button"
-                onClick={() => setQuestion("Que livros de John Grisham existem no catalogo?")}
+                onClick={() => setQuestion("Que livros tem melhor avaliacao?")}
               >
-                Autores no CSV
+                Melhor avaliacao
               </button>
             </div>
           </article>
@@ -505,7 +354,7 @@ export default function App() {
               <textarea
                 value={question}
                 onChange={(event) => setQuestion(event.target.value)}
-                placeholder="Pergunta por titulo, autor, categoria, preco, avaliacao ou disponibilidade..."
+                placeholder="Pergunta por titulo, autor, avaliacao, idioma, paginas ou editora..."
                 rows={4}
               />
 

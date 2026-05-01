@@ -5,15 +5,12 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha1
 from pathlib import Path
 from typing import Generator
-from urllib.parse import urljoin
 
-import requests
-from bs4 import BeautifulSoup
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
@@ -27,22 +24,21 @@ from backend.schemas import (
     ChatResponse,
     LocalImportRequest,
     LocalImportResponse,
-    ScrapeRequest,
-    ScrapeResponse,
 )
 
 _documents_store: Chroma | None = None
 _llm: ChatOllama | None = None
 _csv_cache_lock = threading.Lock()
-_scrape_thread_local = threading.local()
+_local_import_lock = threading.Lock()
 _prompt = ChatPromptTemplate.from_template(
     """
-    Es um assistente especialista no catalogo do Books to Scrape.
+    Es um assistente especialista no catalogo de livros indexado.
     Responde sempre em portugues de Portugal, de forma clara e objetiva.
 
     Usa apenas o contexto de livros fornecido.
-    Se a informacao nao existir no contexto, diz isso explicitamente.
-    Nao respondas a pedidos que nao sejam sobre livros ou sobre este catalogo.
+    Se a informacao nao existir no contexto, diz apenas que nao encontraste informacao suficiente no indice.
+    Nunca digas que nao podes fornecer informacoes por motivos genericos.
+    Nao respondas a pedidos que nao sejam sobre livros ou sobre o catalogo indexado.
     Nao inventes dados.
 
     Contexto de livros:
@@ -54,6 +50,51 @@ _prompt = ChatPromptTemplate.from_template(
 )
 
 CSV_CACHE_VERSION = "1"
+
+_STOPWORDS = {
+    "about",
+    "and",
+    "are",
+    "book",
+    "books",
+    "com",
+    "dos",
+    "das",
+    "de",
+    "do",
+    "e",
+    "fala",
+    "falar",
+    "for",
+    "from",
+    "livro",
+    "livros",
+    "na",
+    "nas",
+    "no",
+    "nos",
+    "of",
+    "os",
+    "por",
+    "que",
+    "qual",
+    "quais",
+    "sobre",
+    "the",
+    "um",
+    "uma",
+}
+
+_DESCRIPTIVE_INTENT_TERMS = {
+    "descreve",
+    "descricao",
+    "detalha",
+    "explica",
+    "fala",
+    "resume",
+    "resumo",
+    "sobre",
+}
 
 
 def _get_embeddings() -> OllamaEmbeddings:
@@ -101,148 +142,8 @@ def initialize_chroma() -> Chroma:
     return _documents_store
 
 
-def _fetch_html(session: requests.Session, url: str) -> BeautifulSoup:
-    response = session.get(
-        url,
-        timeout=20,
-        headers={"User-Agent": "ChatBotAO/1.0 educational scraper"},
-    )
-    response.raise_for_status()
-    return BeautifulSoup(response.text, "html.parser")
-
-
-def _get_scrape_session() -> requests.Session:
-    session = getattr(_scrape_thread_local, "session", None)
-    if session is None:
-        session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(
-            pool_connections=settings.books_scrape_workers,
-            pool_maxsize=settings.books_scrape_workers,
-        )
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        _scrape_thread_local.session = session
-
-    return session
-
-
 def _clean_text(value: str) -> str:
     return html.unescape(" ".join(str(value).split()))
-
-
-def _rating_from_classes(classes: list[str]) -> str:
-    for class_name in classes:
-        if class_name in {"One", "Two", "Three", "Four", "Five"}:
-            return class_name
-    return "Unknown"
-
-
-def _extract_product_links(page: BeautifulSoup, page_url: str) -> list[str]:
-    links = []
-    for anchor in page.select("article.product_pod h3 a"):
-        href = anchor.get("href")
-        if href:
-            links.append(urljoin(page_url, href))
-    return links
-
-
-def _extract_next_page(page: BeautifulSoup, page_url: str) -> str | None:
-    next_anchor = page.select_one("li.next a")
-    if not next_anchor:
-        return None
-
-    href = next_anchor.get("href")
-    if not href:
-        return None
-
-    return urljoin(page_url, href)
-
-
-def _extract_book_document(page: BeautifulSoup, url: str) -> Document:
-    title = _clean_text(page.select_one("div.product_main h1").get_text())
-    price = _clean_text(page.select_one(".price_color").get_text())
-    availability = _clean_text(page.select_one(".availability").get_text())
-    rating_node = page.select_one(".star-rating")
-    rating = _rating_from_classes(rating_node.get("class", []) if rating_node else [])
-
-    category_links = page.select(".breadcrumb li a")
-    category = _clean_text(category_links[-1].get_text()) if category_links else "Books"
-
-    description = ""
-    description_header = page.select_one("#product_description")
-    if description_header:
-        description_node = description_header.find_next_sibling("p")
-        if description_node:
-            description = _clean_text(description_node.get_text())
-
-    table_data = {}
-    for row in page.select("table.table.table-striped tr"):
-        key_node = row.select_one("th")
-        value_node = row.select_one("td")
-        if key_node and value_node:
-            table_data[_clean_text(key_node.get_text())] = _clean_text(value_node.get_text())
-
-    upc = table_data.get("UPC", "")
-    reviews = table_data.get("Number of reviews", "0")
-
-    content = "\n".join(
-        [
-            f"Titulo: {title}",
-            f"Categoria: {category}",
-            f"Preco: {price}",
-            f"Disponibilidade: {availability}",
-            f"Classificacao: {rating}",
-            f"UPC: {upc}",
-            f"Numero de reviews: {reviews}",
-            f"URL: {url}",
-            f"Descricao: {description or 'Sem descricao disponivel.'}",
-        ]
-    )
-
-    return Document(
-        page_content=content,
-        metadata={
-            "source": title,
-            "title": title,
-            "category": category,
-            "price": price,
-            "availability": availability,
-            "rating": rating,
-            "url": url,
-            "site": "books.toscrape.com",
-        },
-    )
-
-
-def _scrape_book_documents(max_pages: int) -> list[Document]:
-    session = requests.Session()
-    page_url = settings.books_base_url
-    product_urls = []
-
-    for _ in range(max_pages):
-        catalog_page = _fetch_html(session, page_url)
-        product_urls.extend(_extract_product_links(catalog_page, page_url))
-
-        next_page = _extract_next_page(catalog_page, page_url)
-        if not next_page:
-            break
-
-        page_url = next_page
-        time.sleep(settings.books_scrape_request_delay)
-
-    if not product_urls:
-        return []
-
-    def fetch_product(product_url: str) -> Document:
-        if settings.books_scrape_request_delay > 0:
-            time.sleep(settings.books_scrape_request_delay)
-
-        product_page = _fetch_html(_get_scrape_session(), product_url)
-        return _extract_book_document(product_page, product_url)
-
-    worker_count = max(1, min(settings.books_scrape_workers, len(product_urls)))
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        return list(executor.map(fetch_product, product_urls))
 
 
 def _build_chunks(documents: list[Document]) -> list[Document]:
@@ -251,12 +152,6 @@ def _build_chunks(documents: list[Document]) -> list[Document]:
         chunk_overlap=settings.chunk_overlap,
     )
     return splitter.split_documents(documents)
-
-
-def _document_id(document: Document, index: int) -> str:
-    url = document.metadata.get("url", "")
-    digest = sha1(f"{url}:{index}".encode("utf-8")).hexdigest()
-    return f"book-{digest}"
 
 
 def _local_document_id(document: Document, index: int) -> str:
@@ -314,61 +209,96 @@ def _add_new_documents_in_batches(
 
         batch_chunks, batch_ids = zip(*batch, strict=True)
         documents_store.add_documents(list(batch_chunks), ids=list(batch_ids))
+        if settings.chroma_add_batch_delay > 0:
+            time.sleep(settings.chroma_add_batch_delay)
 
     return len(pending)
-
-
-def scrape_books(payload: ScrapeRequest) -> ScrapeResponse:
-    documents = _scrape_book_documents(payload.max_pages)
-    if not documents:
-        raise RuntimeError("Nao foi encontrado nenhum livro para indexar.")
-
-    chunks = _build_chunks(documents)
-    ids = [_document_id(chunk, index) for index, chunk in enumerate(chunks)]
-
-    documents_store = initialize_chroma()
-    chunks_added = _add_new_documents_in_batches(documents_store, chunks, ids)
-
-    return ScrapeResponse(
-        message="Catalogo de livros indexado com sucesso.",
-        books_indexed=len(documents),
-        chunks_added=chunks_added,
-        max_pages=payload.max_pages,
-    )
 
 
 def _books_data_path(file_name: str) -> Path:
     return Path(settings.local_books_data_directory) / file_name
 
 
-def _read_local_books(limit: int) -> list[dict]:
+def _normalize_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value.lower())
+    return "".join(character for character in normalized if not unicodedata.combining(character))
+
+
+def _parse_local_book_row(row: dict) -> dict | None:
+    isbn = _clean_text(row.get("ISBN", "") or row.get("isbn", ""))
+    title = _clean_text(row.get("Book-Title", "") or row.get("title", ""))
+    if not isbn or not title:
+        return None
+
+    publication_date = _clean_text(row.get("publication_date", ""))
+    publication_year = _clean_text(row.get("Year-Of-Publication", ""))
+    if not publication_year and publication_date:
+        publication_year = publication_date.split("/")[-1]
+
+    return {
+        "isbn": isbn,
+        "title": title,
+        "author": _clean_text(row.get("Book-Author", "") or row.get("authors", "")),
+        "year": publication_year,
+        "publisher": _clean_text(row.get("Publisher", "") or row.get("publisher", "")),
+        "image_url": _clean_text(row.get("Image-URL-L", "")),
+        "average_rating": _clean_text(row.get("average_rating", "")),
+        "ratings_count": _clean_text(row.get("ratings_count", "")),
+        "text_reviews_count": _clean_text(row.get("text_reviews_count", "")),
+        "language_code": _clean_text(row.get("language_code", "")),
+        "num_pages": _clean_text(row.get("  num_pages", "") or row.get("num_pages", "")),
+        "publication_date": publication_date,
+    }
+
+
+def _local_books_csv_reader(file) -> csv.DictReader:
+    sample = file.read(4096)
+    file.seek(0)
+    delimiter = ";" if sample.splitlines()[0].count(";") > sample.splitlines()[0].count(",") else ","
+    return csv.DictReader(file, delimiter=delimiter)
+
+
+def _local_books_encoding(path: Path) -> str:
+    sample = path.read_bytes()[:4096]
+    try:
+        sample.decode("utf-8-sig")
+        return "utf-8-sig"
+    except UnicodeDecodeError:
+        return "latin-1"
+
+
+def _iter_local_book_batches(limit: int, batch_size: int) -> Generator[list[dict], None, None]:
     books_path = _books_data_path("books.csv")
     if not books_path.exists():
         raise RuntimeError(f"Nao foi encontrado o ficheiro local {books_path}.")
 
-    books = []
-    with books_path.open("r", encoding="latin-1", newline="") as file:
-        reader = csv.DictReader(file, delimiter=";")
+    books_batch = []
+    books_read = 0
+    with books_path.open("r", encoding=_local_books_encoding(books_path), newline="") as file:
+        reader = _local_books_csv_reader(file)
         for row in reader:
-            isbn = _clean_text(row.get("ISBN", ""))
-            title = _clean_text(row.get("Book-Title", ""))
-            if not isbn or not title:
+            book = _parse_local_book_row(row)
+            if not book:
                 continue
 
-            books.append(
-                {
-                    "isbn": isbn,
-                    "title": title,
-                    "author": _clean_text(row.get("Book-Author", "")),
-                    "year": _clean_text(row.get("Year-Of-Publication", "")),
-                    "publisher": _clean_text(row.get("Publisher", "")),
-                    "image_url": _clean_text(row.get("Image-URL-L", "")),
-                }
-            )
+            books_batch.append(book)
+            books_read += 1
 
-            if len(books) >= limit:
+            if len(books_batch) >= batch_size:
+                yield books_batch
+                books_batch = []
+
+            if books_read >= limit:
                 break
 
+    if books_batch:
+        yield books_batch
+
+
+def _read_local_books(limit: int) -> list[dict]:
+    books = []
+    for books_batch in _iter_local_book_batches(limit, limit):
+        books.extend(books_batch)
     return books
 
 
@@ -578,31 +508,51 @@ def _build_local_book_documents(books: list[dict]) -> tuple[list[Document], int]
 
     for book in books:
         ratings = rating_summary.get(book["isbn"], {})
-        average_rating = ratings.get("average")
-        rating_count = ratings.get("count", 0)
-        rating_text = (
-            f"{average_rating}/10 baseado em {rating_count} avaliacoes"
-            if average_rating is not None
-            else "Sem avaliacoes positivas no ficheiro local"
-        )
+        if book.get("average_rating"):
+            rating_count = book.get("ratings_count") or "numero desconhecido de"
+            rating_text = f"{book['average_rating']}/5 baseado em {rating_count} avaliacoes"
+        else:
+            average_rating = ratings.get("average")
+            rating_count = ratings.get("count", 0)
+            rating_text = (
+                f"{average_rating}/10 baseado em {rating_count} avaliacoes"
+                if average_rating is not None
+                else "Sem avaliacoes positivas no ficheiro local"
+            )
         locations = ratings.get("locations", [])
         location_text = (
             ", ".join(f"{country} ({count})" for country, count in locations)
             if locations
             else "Sem localizacoes de utilizadores associadas"
         )
+        review_text = (
+            f"{book['text_reviews_count']} reviews de texto"
+            if book.get("text_reviews_count")
+            else "Sem contagem de reviews de texto"
+        )
+        page_text = (
+            f"{book['num_pages']} paginas"
+            if book.get("num_pages")
+            else "Numero de paginas desconhecido"
+        )
+        language_text = book.get("language_code") or "Idioma desconhecido"
+        publication_text = book.get("publication_date") or book["year"] or "Desconhecida"
 
         content = "\n".join(
             [
                 f"Titulo: {book['title']}",
                 f"Autor: {book['author'] or 'Desconhecido'}",
                 f"Ano de publicacao: {book['year'] or 'Desconhecido'}",
+                f"Data de publicacao: {publication_text}",
                 f"Editora: {book['publisher'] or 'Desconhecida'}",
                 f"ISBN: {book['isbn']}",
+                f"Idioma: {language_text}",
+                f"Paginas: {page_text}",
                 f"Classificacao local: {rating_text}",
+                f"Reviews: {review_text}",
                 f"Localizacoes dos avaliadores: {location_text}",
                 f"Imagem: {book['image_url'] or 'Sem imagem'}",
-                "Origem: backend/books_data/books.csv, ratings.csv e users.csv",
+                "Origem: backend/books_data/books.csv",
             ]
         )
 
@@ -616,6 +566,8 @@ def _build_local_book_documents(books: list[dict]) -> tuple[list[Document], int]
                     "year": book["year"],
                     "publisher": book["publisher"],
                     "isbn": book["isbn"],
+                    "average_rating": book.get("average_rating", ""),
+                    "language_code": book.get("language_code", ""),
                     "site": "backend/books_data",
                 },
             )
@@ -625,39 +577,57 @@ def _build_local_book_documents(books: list[dict]) -> tuple[list[Document], int]
 
 
 def import_local_books(payload: LocalImportRequest) -> LocalImportResponse:
-    books = _read_local_books(payload.limit)
-    if not books:
+    total_books_indexed = 0
+    total_chunks_added = 0
+    total_ratings_loaded = 0
+    batch_size = max(1, settings.local_books_ingest_batch_size)
+
+    with _local_import_lock:
+        documents_store = initialize_chroma()
+        for books in _iter_local_book_batches(payload.limit, batch_size):
+            documents, ratings_loaded = _build_local_book_documents(books)
+            chunks = _build_chunks(documents)
+            ids = [
+                _local_document_id(chunk, index)
+                for index, chunk in enumerate(chunks)
+            ]
+
+            total_chunks_added += _add_new_documents_in_batches(
+                documents_store,
+                chunks,
+                ids,
+            )
+            total_books_indexed += len(documents)
+            total_ratings_loaded += ratings_loaded
+
+            if settings.local_books_ingest_batch_delay > 0:
+                time.sleep(settings.local_books_ingest_batch_delay)
+
+    if total_books_indexed == 0:
         raise RuntimeError("Nao foi encontrado nenhum livro no ficheiro local.")
-
-    documents, ratings_loaded = _build_local_book_documents(books)
-    chunks = _build_chunks(documents)
-    ids = [_local_document_id(chunk, index) for index, chunk in enumerate(chunks)]
-
-    documents_store = initialize_chroma()
-    chunks_added = _add_new_documents_in_batches(documents_store, chunks, ids)
 
     return LocalImportResponse(
         message="Ficheiro local de livros indexado com sucesso.",
-        books_indexed=len(documents),
-        chunks_added=chunks_added,
-        ratings_loaded=ratings_loaded,
+        books_indexed=total_books_indexed,
+        chunks_added=total_chunks_added,
+        ratings_loaded=total_ratings_loaded,
         limit=payload.limit,
     )
 
 
 def _question_terms(question: str) -> list[str]:
     return [
-        term.lower()
-        for term in re.findall(r"[\w']+", question, flags=re.UNICODE)
-        if len(term) >= 3
+        term
+        for term in re.findall(r"[\w']+", _normalize_text(question), flags=re.UNICODE)
+        if len(term) >= 3 and term not in _STOPWORDS
     ]
 
 
 def _document_match_score(document: Document, question: str, terms: list[str]) -> int:
-    title = str(document.metadata.get("title", "")).lower()
-    author = str(document.metadata.get("author", "")).lower()
-    content = document.page_content.lower()
-    question_lower = question.lower()
+    title = _normalize_text(str(document.metadata.get("title", "")))
+    author = _normalize_text(str(document.metadata.get("author", "")))
+    content = _normalize_text(document.page_content)
+    question_lower = _normalize_text(question)
 
     score = 0
     if title and title in question_lower:
@@ -674,6 +644,19 @@ def _document_match_score(document: Document, question: str, terms: list[str]) -
             score += 1
 
     return score
+
+
+def _document_matched_term_count(document: Document, terms: list[str]) -> int:
+    haystack = _normalize_text(
+        " ".join(
+            [
+                str(document.metadata.get("title", "")),
+                str(document.metadata.get("author", "")),
+                document.page_content,
+            ]
+        )
+    )
+    return sum(1 for term in terms if term in haystack)
 
 
 def _rerank_documents(
@@ -693,17 +676,220 @@ def _rerank_documents(
     return [document for _, document in ranked_documents[:k]]
 
 
-def _get_book_context(question: str, k: int) -> tuple[str, list[str]]:
+def _find_local_catalog_matches(question: str, limit: int = 3) -> list[dict[str, str]]:
+    terms = _question_terms(question)
+    if not terms:
+        return []
+
+    books_path = _books_data_path("books.csv")
+    if not books_path.exists():
+        return []
+
+    matches = []
+    question_lower = _normalize_text(question)
+    with books_path.open("r", encoding=_local_books_encoding(books_path), newline="") as file:
+        reader = _local_books_csv_reader(file)
+        for row in reader:
+            book = _parse_local_book_row(row)
+            if not book:
+                continue
+
+            title = _normalize_text(book["title"])
+            author = _normalize_text(book["author"])
+            haystack = f"{title} {author}"
+            score = sum(1 for term in terms if term in haystack)
+            if title and title in question_lower:
+                score += 10
+            if author and author in question_lower:
+                score += 5
+            if score == 0:
+                continue
+
+            matches.append({**book, "score": str(score)})
+
+    matches.sort(key=lambda match: int(match["score"]), reverse=True)
+    return matches[:limit]
+
+
+def _build_context_from_local_matches(
+    local_matches: list[dict[str, str]],
+) -> tuple[str, list[str]]:
+    documents, _ = _build_local_book_documents(local_matches)
+    sources = []
+    context_parts = []
+
+    for document in documents:
+        source_name = document.metadata.get("source", "desconhecido")
+        sources.append(source_name)
+        context_parts.append(f"Livro: {source_name}\n{document.page_content}")
+
+    return "\n\n".join(context_parts), list(dict.fromkeys(sources))
+
+
+def _should_answer_from_local_catalog(
+    question: str,
+    local_matches: list[dict[str, str]],
+) -> bool:
+    if not local_matches:
+        return False
+
+    question_terms = set(
+        re.findall(r"[\w']+", _normalize_text(question), flags=re.UNICODE)
+    )
+    if question_terms & _DESCRIPTIVE_INTENT_TERMS:
+        return False
+
+    terms = _question_terms(question)
+    if not terms:
+        return False
+
+    top_score = int(local_matches[0].get("score", "0"))
+    minimum_score = min(2, len(terms))
+    return len(terms) <= 5 and top_score >= minimum_score
+
+
+def _should_describe_from_local_catalog(
+    question: str,
+    local_matches: list[dict[str, str]],
+) -> bool:
+    if not local_matches:
+        return False
+
+    question_terms = set(
+        re.findall(r"[\w']+", _normalize_text(question), flags=re.UNICODE)
+    )
+    return bool(question_terms & _DESCRIPTIVE_INTENT_TERMS)
+
+
+def _build_local_catalog_answer(local_matches: list[dict[str, str]]) -> str:
+    lines = []
+    for match in local_matches:
+        details = [
+            f"autor: {match.get('author') or 'desconhecido'}",
+            f"ano: {match.get('year') or 'desconhecido'}",
+            f"editora: {match.get('publisher') or 'desconhecida'}",
+            f"ISBN: {match.get('isbn') or 'desconhecido'}",
+        ]
+
+        if match.get("average_rating"):
+            details.append(f"avaliacao media: {match['average_rating']}/5")
+        if match.get("ratings_count"):
+            details.append(f"{match['ratings_count']} avaliacoes")
+        if match.get("num_pages"):
+            details.append(f"{match['num_pages']} paginas")
+        if match.get("language_code"):
+            details.append(f"idioma: {match['language_code']}")
+
+        lines.append(f"- {match['title']} ({'; '.join(details)}).")
+
+    return "Encontrei estes livros no catalogo local:\n" + "\n".join(lines)
+
+
+def _build_book_description_answer(local_matches: list[dict[str, str]]) -> str:
+    if not local_matches:
+        return (
+            "Nao encontrei esse livro no catalogo local. Tenta indicar o titulo "
+            "ou o autor com mais detalhe."
+        )
+
+    primary = local_matches[0]
+    related = local_matches[1:]
+    publication_year = f" em {primary['year']}" if primary.get("year") else ""
+    parts = [
+        (
+            f"{primary['title']} e um livro de {primary.get('author') or 'autor desconhecido'}, "
+            f"publicado por {primary.get('publisher') or 'editora desconhecida'}"
+            f"{publication_year}."
+        )
+    ]
+
+    facts = []
+    if primary.get("average_rating"):
+        rating_text = f"tem avaliacao media de {primary['average_rating']}/5"
+        if primary.get("ratings_count"):
+            rating_text += f" com {primary['ratings_count']} avaliacoes"
+        facts.append(rating_text)
+    if primary.get("num_pages"):
+        facts.append(f"tem {primary['num_pages']} paginas")
+    if primary.get("language_code"):
+        facts.append(f"esta registado no idioma {primary['language_code']}")
+    if primary.get("isbn"):
+        facts.append(f"o ISBN e {primary['isbn']}")
+
+    if facts:
+        parts.append("No catalogo, " + ", ".join(facts) + ".")
+
+    if related:
+        related_titles = ", ".join(match["title"] for match in related[:2])
+        parts.append(f"Tambem encontrei entradas relacionadas: {related_titles}.")
+
+    parts.append(
+        "Nota: o CSV nao inclui sinopse/enredo, por isso so consigo falar com base nos metadados disponiveis."
+    )
+
+    return " ".join(parts)
+
+
+def _build_no_context_answer(local_matches: list[dict[str, str]]) -> str:
+    if local_matches:
+        match_lines = [
+            (
+                f"- {match['title']}, de {match['author']} "
+                f"({match['year']}, {match['publisher']}, ISBN {match['isbn']})."
+            )
+            for match in local_matches
+        ]
+        matches_text = "\n".join(match_lines)
+        return (
+            "Nao encontrei contexto relevante ja indexado no ChromaDB para responder em detalhe. "
+            "Mas encontrei possiveis correspondencias no CSV local:\n"
+            f"{matches_text}\n\n"
+            "Para o chatbot responder com base no indice, importa mais livros do CSV local "
+            "e volta a fazer a pergunta."
+        )
+
+    return (
+        "Nao encontrei informacao suficiente no indice para responder a essa pergunta. "
+        "Confirma se ja importaste/indexaste livros suficientes e se o titulo ou autor existe no catalogo."
+    )
+
+
+def _get_book_context(
+    question: str,
+    k: int,
+) -> tuple[str, list[str], bool, list[dict[str, str]]]:
     documents_store = initialize_chroma()
     if _book_count() == 0:
-        return "Ainda nao existem livros indexados no ChromaDB.", []
+        local_matches = _find_local_catalog_matches(question)
+        if local_matches:
+            document_context, sources = _build_context_from_local_matches(local_matches)
+            return document_context, sources, True, []
+        return "Ainda nao existem livros indexados no ChromaDB.", [], False, []
 
     candidate_count = min(max(k * 4, 12), 40)
     documents = documents_store.similarity_search(question, k=candidate_count)
     if not documents:
-        return "Nao foi encontrado contexto de livros relevante.", []
+        local_matches = _find_local_catalog_matches(question)
+        if local_matches:
+            document_context, sources = _build_context_from_local_matches(local_matches)
+            return document_context, sources, True, []
+        return "Nao foi encontrado contexto de livros relevante.", [], False, []
 
     documents = _rerank_documents(documents, question, k)
+    terms = _question_terms(question)
+    minimum_matches = 2 if len(terms) >= 2 else 1
+    documents = [
+        document
+        for document in documents
+        if _document_matched_term_count(document, terms) >= minimum_matches
+    ]
+    if not documents:
+        local_matches = _find_local_catalog_matches(question)
+        if local_matches:
+            document_context, sources = _build_context_from_local_matches(local_matches)
+            return document_context, sources, True, []
+        return "Nao foi encontrado contexto de livros relevante.", [], False, []
+
     sources = []
     context_parts = []
 
@@ -713,7 +899,7 @@ def _get_book_context(question: str, k: int) -> tuple[str, list[str]]:
         context_parts.append(f"Livro: {source_name}\n{document.page_content}")
 
     unique_sources = list(dict.fromkeys(sources))
-    return "\n\n".join(context_parts), unique_sources
+    return "\n\n".join(context_parts), unique_sources, True, []
 
 
 def _build_chain():
@@ -725,7 +911,32 @@ def run_chat(payload: ChatRequest) -> ChatResponse:
     if not question:
         raise ValueError("A pergunta nao pode estar vazia.")
 
-    document_context, sources = _get_book_context(question, payload.top_k)
+    local_matches = _find_local_catalog_matches(question)
+    if _should_describe_from_local_catalog(question, local_matches):
+        return ChatResponse(
+            question=question,
+            answer=_build_book_description_answer(local_matches),
+            document_sources=[match["title"] for match in local_matches],
+        )
+
+    if _should_answer_from_local_catalog(question, local_matches):
+        return ChatResponse(
+            question=question,
+            answer=_build_local_catalog_answer(local_matches),
+            document_sources=[match["title"] for match in local_matches],
+        )
+
+    document_context, sources, has_relevant_context, local_matches = _get_book_context(
+        question,
+        payload.top_k,
+    )
+    if not has_relevant_context:
+        fallback_sources = [match["title"] for match in local_matches]
+        return ChatResponse(
+            question=question,
+            answer=_build_no_context_answer(local_matches),
+            document_sources=fallback_sources,
+        )
 
     try:
         answer = _build_chain().invoke(
@@ -755,7 +966,40 @@ def stream_chat(payload: ChatRequest) -> Generator[str, None, None]:
         return
 
     try:
-        document_context, sources = _get_book_context(question, payload.top_k)
+        local_matches = _find_local_catalog_matches(question)
+        if _should_describe_from_local_catalog(question, local_matches):
+            yield _json_event(
+                {"type": "sources", "sources": [match["title"] for match in local_matches]}
+            )
+            yield _json_event(
+                {"type": "token", "content": _build_book_description_answer(local_matches)}
+            )
+            yield _json_event({"type": "done"})
+            return
+
+        if _should_answer_from_local_catalog(question, local_matches):
+            yield _json_event(
+                {"type": "sources", "sources": [match["title"] for match in local_matches]}
+            )
+            yield _json_event(
+                {"type": "token", "content": _build_local_catalog_answer(local_matches)}
+            )
+            yield _json_event({"type": "done"})
+            return
+
+        document_context, sources, has_relevant_context, local_matches = _get_book_context(
+            question,
+            payload.top_k,
+        )
+        if not has_relevant_context:
+            fallback_sources = [match["title"] for match in local_matches]
+            yield _json_event({"type": "sources", "sources": fallback_sources})
+            yield _json_event(
+                {"type": "token", "content": _build_no_context_answer(local_matches)}
+            )
+            yield _json_event({"type": "done"})
+            return
+
         yield _json_event({"type": "sources", "sources": sources})
 
         chain = _prompt | _get_llm()
