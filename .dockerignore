@@ -33,6 +33,9 @@ run_logs/
 
 # Local data
 chroma_data/
+backend/books_data/*.sqlite
+backend/books_data/*.sqlite3
+backend/books_data/*.sqlite3-*
 
 # Frontend
 node_modules/

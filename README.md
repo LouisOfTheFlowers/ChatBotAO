@@ -1,8 +1,10 @@
-# Plataforma de Chatbot com RAG
+# Plataforma de Chatbot de Livros com RAG
 
 Projeto simples e funcional para um trabalho academico. O sistema combina:
 
-- documentos nao estruturados indexados no ChromaDB
+- catalogo de livros de `https://books.toscrape.com`
+- ficheiros locais em `backend/books_data`
+- ChromaDB para pesquisa semantica
 - modelo local no Ollama
 - API em FastAPI
 
@@ -12,14 +14,16 @@ Projeto simples e funcional para um trabalho academico. O sistema combina:
 - LangChain
 - ChromaDB
 - Ollama
+- React
 
 ## Estrutura do projeto
 
 ```text
 backend/
+  books_data/    # CSVs locais com livros, ratings e utilizadores
   config.py      # Variaveis de ambiente e configuracao
   main.py        # Endpoints FastAPI
-  rag.py         # Logica de upload, embeddings, pesquisa e geracao com ChromaDB
+  rag.py         # Scraping, importacao local, embeddings, pesquisa e geracao
   schemas.py     # Modelos de pedidos e respostas
 docker-compose.yml
 requirements.txt
@@ -46,113 +50,51 @@ docker exec -it ollama ollama pull llama3.2:1b
 docker exec -it ollama ollama pull nomic-embed-text
 ```
 
-Depois de descarregar os modelos, reinicia o backend para garantir que arranca com tudo pronto:
+Depois de descarregar os modelos, reinicia o backend:
 
 ```bash
 docker compose restart backend
 ```
-
-Nota: se quiseres usar `llama3`, aumenta a memoria do Docker Desktop para pelo menos 6 GB antes de o definir em `OLLAMA_LLM_MODEL`.
 
 ### 3. Enderecos da aplicacao
 
 - Swagger UI: `http://127.0.0.1:8000/docs`
 - Frontend React: `http://127.0.0.1:3000`
 
-## Execucao local sem Docker
-
-### 1. Subir apenas o Ollama
-
-```bash
-docker compose up -d ollama
-```
-
-### 2. Instalar dependencias Python
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### 3. Configurar variaveis de ambiente do backend
-
-```bash
-copy .env.example .env
-```
-
-### 4. Correr a API
-
-```bash
-uvicorn backend.main:app --reload
-```
-
-### 5. Correr o frontend React
-
-```bash
-cd Frontend
-npm install
-copy .env.example .env
-npm run dev
-```
-
 ## Como funciona
 
-### Endpoint `/upload`
+### Endpoint `/books/scrape`
 
-Recebe um ficheiro PDF ou TXT e faz:
-
-1. extracao do texto
-2. divisao em chunks
-3. geracao de embeddings
-4. armazenamento no ChromaDB
-
-Exemplo com `curl`:
+Pesquisa paginas do catalogo `books.toscrape.com`, extrai detalhes dos livros e guarda chunks no ChromaDB.
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/upload" ^
-  -H "accept: application/json" ^
-  -H "Content-Type: multipart/form-data" ^
-  -F "file=@regras.pdf"
+curl -X POST "http://127.0.0.1:8000/books/scrape" \
+  -H "Content-Type: application/json" \
+  -d "{\"max_pages\":5}"
 ```
 
-### Endpoint `/chat`
+### Endpoint `/books/import-local`
 
-Recebe uma pergunta e:
-
-1. pesquisa chunks relevantes no ChromaDB
-2. junta o contexto encontrado
-3. envia tudo para o modelo no Ollama
-4. devolve a resposta final
-
-Exemplo:
+Le `backend/books_data/books.csv`, junta medias de `ratings.csv`, usa localizacoes de `users.csv` quando existem e guarda esses livros no ChromaDB.
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/chat" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"question\":\"Quais sao as regras?\"}"
+curl -X POST "http://127.0.0.1:8000/books/import-local" \
+  -H "Content-Type: application/json" \
+  -d "{\"limit\":1000}"
 ```
 
-Exemplo com resumo:
+### Endpoint `/chat/stream`
+
+Recebe uma pergunta sobre livros e devolve a resposta em streaming.
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/chat" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"question\":\"Resume os pontos principais do regulamento.\"}"
+curl -N -X POST "http://127.0.0.1:8000/chat/stream" \
+  -H "Content-Type: application/json" \
+  -d "{\"question\":\"Que livros de John Grisham existem?\",\"top_k\":3}"
 ```
-
-## Como adicionar novos documentos
-
-1. Envia um novo ficheiro para o endpoint `/upload`
-2. O texto sera convertido em chunks
-3. Os embeddings serao guardados no ChromaDB
-4. O chatbot passa a poder usar esse conteudo nas respostas
-
-Nao e necessario reiniciar a API para adicionar novos documentos.
 
 ## Observacoes academicas
 
-- O projeto foi mantido simples de proposito.
-- O frontend nao e necessario; os testes podem ser feitos por Swagger, Postman ou `curl`.
-- O sistema responde apenas com base nos documentos enviados para o endpoint `/upload`.
-- O frontend React permite demonstrar o fluxo completo de upload e perguntas sobre documentos.
+- O chatbot responde apenas com base nos livros indexados no ChromaDB.
+- O frontend permite indexar dados do site, importar CSV local e fazer perguntas sobre livros.
+- O limite de importacao local evita tentar criar embeddings para centenas de milhares de livros de uma vez.

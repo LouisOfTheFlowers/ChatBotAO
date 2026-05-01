@@ -33,6 +33,9 @@ run_logs/
 
 # Local vector database storage
 chroma_data/
+backend/books_data/*.sqlite
+backend/books_data/*.sqlite3
+backend/books_data/*.sqlite3-*
 
 # Frontend / React
 node_modules/

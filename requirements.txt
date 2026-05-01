@@ -6,6 +6,6 @@ langchain-core
 langchain-text-splitters
 langchain-ollama
 chromadb
-python-multipart
-pypdf
+beautifulsoup4
+requests
 pydantic-settings
