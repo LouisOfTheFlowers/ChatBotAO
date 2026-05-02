@@ -51,6 +51,19 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    let statusInterval = null;
+
+    async function refreshBooksStatusSafely() {
+      try {
+        await refreshBooksStatus();
+      } catch (error) {
+        if (!cancelled) {
+          setIndexStatus("unavailable");
+          setIndexError(error.message || "Indice indisponivel.");
+          setBooksIndexed(0);
+        }
+      }
+    }
 
     async function pingBackend() {
       try {
@@ -63,14 +76,9 @@ export default function App() {
           setBackendStatus("online");
         }
 
-        try {
-          await refreshBooksStatus();
-        } catch (error) {
-          if (!cancelled) {
-            setIndexStatus("unavailable");
-            setIndexError(error.message || "Indice indisponivel.");
-            setBooksIndexed(0);
-          }
+        await refreshBooksStatusSafely();
+        if (!cancelled) {
+          statusInterval = window.setInterval(refreshBooksStatusSafely, 5000);
         }
       } catch {
         if (!cancelled) {
@@ -84,6 +92,9 @@ export default function App() {
     pingBackend();
     return () => {
       cancelled = true;
+      if (statusInterval) {
+        window.clearInterval(statusInterval);
+      }
     };
   }, []);
 

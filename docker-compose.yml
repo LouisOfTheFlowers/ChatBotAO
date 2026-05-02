@@ -13,6 +13,9 @@ services:
       CHROMA_PERSIST_DIRECTORY: /app/chroma_data
       LOCAL_BOOKS_DATA_DIRECTORY: /app/backend/books_data
       LOCAL_BOOKS_CACHE_PATH: /app/backend/books_data/books_cache.sqlite3
+      BOOK_SYNOPSIS_CACHE_PATH: /app/backend/books_data/book_synopses.sqlite3
+      WEB_SYNOPSIS_ENABLED: "true"
+      WEB_SYNOPSIS_TIMEOUT: 8
       LOCAL_BOOKS_IMPORT_LIMIT: 12000
       AUTO_IMPORT_LOCAL_BOOKS: "true"
       LOCAL_BOOKS_INGEST_BATCH_SIZE: 500

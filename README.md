@@ -65,11 +65,18 @@ docker compose restart backend
 ### Importacao do CSV local
 
 Le `backend/books_data/books.csv`, junta medias de `ratings.csv`, usa localizacoes de `users.csv` quando existem e guarda esses livros no ChromaDB.
+Se o CSV tiver uma coluna `sinopse`, `synopsis`, `description`, `descricao`, `summary` ou `plot`,
+esse texto tambem e indexado e usado nas respostas.
+Quando essa coluna esta vazia, o backend pode procurar uma sinopse na Open Library
+por ISBN ou titulo/autor, guardar o resultado em `backend/books_data/book_synopses.sqlite3`
+e reutiliza-lo nas proximas perguntas.
 
 O backend faz esta importacao automaticamente no arranque quando o ChromaDB esta vazio. O Docker Compose vem com:
 
 - `AUTO_IMPORT_LOCAL_BOOKS=true`
 - `LOCAL_BOOKS_IMPORT_LIMIT=12000`
+- `WEB_SYNOPSIS_ENABLED=true`
+- `BOOK_SYNOPSIS_CACHE_PATH=/app/backend/books_data/book_synopses.sqlite3`
 
 Para este CSV, `12000` carrega o ficheiro todo.
 Para um arranque mais rapido e com menos uso de CPU, podes baixar o limite para `5000`.

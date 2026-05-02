@@ -10,6 +10,9 @@ from collections import Counter, defaultdict
 from hashlib import sha1
 from pathlib import Path
 from typing import Generator
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -235,6 +238,15 @@ def _parse_local_book_row(row: dict) -> dict | None:
     if not publication_year and publication_date:
         publication_year = publication_date.split("/")[-1]
 
+    synopsis = _clean_text(
+        row.get("sinopse", "")
+        or row.get("synopsis", "")
+        or row.get("description", "")
+        or row.get("descricao", "")
+        or row.get("summary", "")
+        or row.get("plot", "")
+    )
+
     return {
         "isbn": isbn,
         "title": title,
@@ -248,6 +260,8 @@ def _parse_local_book_row(row: dict) -> dict | None:
         "language_code": _clean_text(row.get("language_code", "")),
         "num_pages": _clean_text(row.get("  num_pages", "") or row.get("num_pages", "")),
         "publication_date": publication_date,
+        "isbn13": _clean_text(row.get("isbn13", "")),
+        "synopsis": synopsis,
     }
 
 
@@ -265,6 +279,175 @@ def _local_books_encoding(path: Path) -> str:
         return "utf-8-sig"
     except UnicodeDecodeError:
         return "latin-1"
+
+
+def _synopsis_cache_path() -> Path:
+    return Path(settings.book_synopsis_cache_path)
+
+
+def _connect_synopsis_cache() -> sqlite3.Connection:
+    cache_path = _synopsis_cache_path()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(cache_path)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS synopsis_cache (
+            cache_key TEXT PRIMARY KEY,
+            synopsis TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            created_at REAL NOT NULL
+        )
+        """
+    )
+    return connection
+
+
+def _synopsis_cache_key(book: dict[str, str]) -> str:
+    isbn = book.get("isbn") or book.get("isbn13")
+    if isbn:
+        return f"isbn:{isbn}"
+
+    identity = _normalize_text(f"{book.get('title', '')}:{book.get('author', '')}")
+    return "title:" + sha1(identity.encode("utf-8")).hexdigest()
+
+
+def _read_cached_synopsis(book: dict[str, str]) -> tuple[str, str] | None:
+    connection = _connect_synopsis_cache()
+    try:
+        row = connection.execute(
+            """
+            SELECT synopsis, source_url
+            FROM synopsis_cache
+            WHERE cache_key = ?
+            """,
+            (_synopsis_cache_key(book),),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    return (row[0], row[1]) if row else None
+
+
+def _write_cached_synopsis(book: dict[str, str], synopsis: str, source_url: str) -> None:
+    connection = _connect_synopsis_cache()
+    try:
+        with connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO synopsis_cache (
+                    cache_key,
+                    synopsis,
+                    source_url,
+                    created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (_synopsis_cache_key(book), synopsis, source_url, time.time()),
+            )
+    finally:
+        connection.close()
+
+
+def _fetch_json_url(url: str) -> dict:
+    request = Request(
+        url,
+        headers={"User-Agent": "ChatBotAO/1.0 book synopsis lookup"},
+    )
+    with urlopen(request, timeout=settings.web_synopsis_timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _open_library_url(path: str) -> str:
+    return f"{settings.open_library_base_url.rstrip('/')}{path}"
+
+
+def _extract_open_library_description(payload: dict) -> str:
+    description = payload.get("description")
+    if isinstance(description, dict):
+        description = description.get("value", "")
+    if isinstance(description, str):
+        return _clean_text(description)
+    return ""
+
+
+def _fetch_open_library_work_synopsis(work_key: str) -> tuple[str, str] | None:
+    source_url = _open_library_url(f"{work_key}.json")
+    payload = _fetch_json_url(source_url)
+    synopsis = _extract_open_library_description(payload)
+    if synopsis:
+        return synopsis, source_url
+    return None
+
+
+def _fetch_open_library_by_isbn(isbn: str) -> tuple[str, str] | None:
+    if not isbn:
+        return None
+
+    edition_url = _open_library_url(f"/isbn/{quote(isbn)}.json")
+    payload = _fetch_json_url(edition_url)
+    synopsis = _extract_open_library_description(payload)
+    if synopsis:
+        return synopsis, edition_url
+
+    for work in payload.get("works", []):
+        work_key = work.get("key")
+        if work_key:
+            work_result = _fetch_open_library_work_synopsis(work_key)
+            if work_result:
+                return work_result
+
+    return None
+
+
+def _fetch_open_library_by_title(book: dict[str, str]) -> tuple[str, str] | None:
+    params = {
+        "title": book.get("title", ""),
+        "fields": "key,title,author_name",
+        "limit": "1",
+    }
+    if book.get("author"):
+        params["author"] = book["author"].split("/")[0]
+
+    search_url = _open_library_url(f"/search.json?{urlencode(params)}")
+    payload = _fetch_json_url(search_url)
+    docs = payload.get("docs", [])
+    if not docs:
+        return None
+
+    work_key = docs[0].get("key")
+    if not work_key:
+        return None
+
+    return _fetch_open_library_work_synopsis(work_key)
+
+
+def _lookup_web_synopsis(book: dict[str, str]) -> tuple[str, str] | None:
+    if not settings.web_synopsis_enabled:
+        return None
+
+    cached = _read_cached_synopsis(book)
+    if cached:
+        return cached
+
+    try:
+        result = None
+        for isbn in (book.get("isbn"), book.get("isbn13")):
+            result = _fetch_open_library_by_isbn(isbn or "")
+            if result:
+                break
+
+        if not result:
+            result = _fetch_open_library_by_title(book)
+
+        if not result:
+            return None
+
+        synopsis, source_url = result
+        _write_cached_synopsis(book, synopsis, source_url)
+        return synopsis, source_url
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return None
 
 
 def _iter_local_book_batches(limit: int, batch_size: int) -> Generator[list[dict], None, None]:
@@ -537,6 +720,7 @@ def _build_local_book_documents(books: list[dict]) -> tuple[list[Document], int]
         )
         language_text = book.get("language_code") or "Idioma desconhecido"
         publication_text = book.get("publication_date") or book["year"] or "Desconhecida"
+        synopsis_text = book.get("synopsis") or "Sem sinopse disponivel"
 
         content = "\n".join(
             [
@@ -552,6 +736,7 @@ def _build_local_book_documents(books: list[dict]) -> tuple[list[Document], int]
                 f"Reviews: {review_text}",
                 f"Localizacoes dos avaliadores: {location_text}",
                 f"Imagem: {book['image_url'] or 'Sem imagem'}",
+                f"Sinopse: {synopsis_text}",
                 "Origem: backend/books_data/books.csv",
             ]
         )
@@ -568,6 +753,7 @@ def _build_local_book_documents(books: list[dict]) -> tuple[list[Document], int]
                     "isbn": book["isbn"],
                     "average_rating": book.get("average_rating", ""),
                     "language_code": book.get("language_code", ""),
+                    "synopsis": book.get("synopsis", ""),
                     "site": "backend/books_data",
                 },
             )
@@ -794,6 +980,12 @@ def _build_book_description_answer(local_matches: list[dict[str, str]]) -> str:
 
     primary = local_matches[0]
     related = local_matches[1:]
+    synopsis_source = ""
+    if not primary.get("synopsis"):
+        web_synopsis = _lookup_web_synopsis(primary)
+        if web_synopsis:
+            primary["synopsis"], synopsis_source = web_synopsis
+
     publication_year = f" em {primary['year']}" if primary.get("year") else ""
     parts = [
         (
@@ -802,6 +994,11 @@ def _build_book_description_answer(local_matches: list[dict[str, str]]) -> str:
             f"{publication_year}."
         )
     ]
+
+    if primary.get("synopsis"):
+        parts.append(f"Sinopse: {primary['synopsis']}")
+        if synopsis_source:
+            parts.append(f"Fonte da sinopse: {synopsis_source}")
 
     facts = []
     if primary.get("average_rating"):
@@ -823,9 +1020,10 @@ def _build_book_description_answer(local_matches: list[dict[str, str]]) -> str:
         related_titles = ", ".join(match["title"] for match in related[:2])
         parts.append(f"Tambem encontrei entradas relacionadas: {related_titles}.")
 
-    parts.append(
-        "Nota: o CSV nao inclui sinopse/enredo, por isso so consigo falar com base nos metadados disponiveis."
-    )
+    if not primary.get("synopsis"):
+        parts.append(
+            "Nota: o CSV nao inclui sinopse/enredo para este livro, por isso so consigo falar com base nos metadados disponiveis."
+        )
 
     return " ".join(parts)
 
